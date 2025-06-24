@@ -1,5 +1,7 @@
-import { prisma } from "@/database";
+import { PrismaClient } from '@prisma/client';
 import { Decimal } from "@prisma/client/runtime/library";
+
+const prisma = new PrismaClient();
 
 // Types for better type safety
 export interface ProductWithRelations {
