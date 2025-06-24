@@ -1,12 +1,49 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { connect, disconnect, healthCheck } from '../database';
+import { PrismaClient } from '@prisma/client';
 import { AppError } from '../shared';
 import productsRouter from './routes/products';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Initialize Prisma client
+const prisma = new PrismaClient();
+
+// Database utility functions
+async function connect() {
+  try {
+    await prisma.$connect();
+    console.log('✅ Database connected successfully');
+  } catch (error) {
+    console.error('❌ Database connection failed:', error);
+    throw error;
+  }
+}
+
+async function disconnect() {
+  try {
+    await prisma.$disconnect();
+    console.log('✅ Database disconnected successfully');
+  } catch (error) {
+    console.error('❌ Database disconnection failed:', error);
+    throw error;
+  }
+}
+
+async function healthCheck() {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return { status: 'healthy', timestamp: new Date().toISOString() };
+  } catch (error) {
+    return { 
+      status: 'unhealthy', 
+      error: error instanceof Error ? error.message : 'Unknown error', 
+      timestamp: new Date().toISOString() 
+    };
+  }
+}
 
 // Middleware
 app.use(helmet());
