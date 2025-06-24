@@ -1,29 +1,36 @@
 import express from 'express';
-import { prisma } from '../../database';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { AppError } from '../../shared';
 
 const router = express.Router();
 
+// PrismaClient singleton pattern
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient };
+const prisma =
+  globalForPrisma.prisma ||
+  new PrismaClient({
+    log: ['query', 'info', 'warn', 'error'],
+  });
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+
 // GET /api/products - Get all products
 router.get('/', async (req, res, next) => {
   try {
-    const { page = 1, limit = 10, category, search } = req.query;
-    
-    const skip = (Number(page) - 1) * Number(limit);
-    
-    // Build where clause
-    const where: any = { isActive: true };
-    
-    if (category) {
-      where.category = { name: { contains: String(category), mode: 'insensitive' } };
-    }
-    
-    if (search) {
-      where.OR = [
-        { name: { contains: String(search), mode: 'insensitive' } },
-        { description: { contains: String(search), mode: 'insensitive' } },
-      ];
-    }
+    const { page = '1', limit = '10', category, search } = req.query;
+    const pageNum = Math.max(Number(page) || 1, 1);
+    const limitNum = Math.max(Number(limit) || 10, 1);
+    const skip = (pageNum - 1) * limitNum;
+
+    const where: Prisma.ProductWhereInput = {
+      isActive: true,
+      ...(category && { categoryId: String(category) }),
+      ...(search && {
+        OR: [
+          { name: { contains: String(search), mode: Prisma.QueryMode.insensitive } },
+          { description: { contains: String(search), mode: Prisma.QueryMode.insensitive } },
+        ],
+      }),
+    };
 
     // Get products with pagination
     const [products, total] = await Promise.all([
@@ -31,37 +38,30 @@ router.get('/', async (req, res, next) => {
         where,
         include: {
           category: true,
-          reviews: {
-            include: {
-              user: {
-                select: { name: true, email: true }
-              }
-            }
-          },
-          _count: {
-            select: { reviews: true }
-          }
+          reviews: true,
+          _count: true,
         },
         skip,
-        take: Number(limit),
-        orderBy: { createdAt: 'desc' }
+        take: limitNum,
+        orderBy: { createdAt: 'desc' },
       }),
-      prisma.product.count({ where })
+      prisma.product.count({ where }),
     ]);
 
-    const totalPages = Math.ceil(total / Number(limit));
+    const totalPages = Math.ceil(total / limitNum);
 
     res.json({
       success: true,
       data: products,
       pagination: {
-        page: Number(page),
-        limit: Number(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        totalPages
-      }
+        totalPages,
+      },
     });
   } catch (error) {
+    console.error(error);
     next(new AppError('Failed to fetch products', 500));
   }
 });
@@ -75,18 +75,9 @@ router.get('/:id', async (req, res, next) => {
       where: { id },
       include: {
         category: true,
-        reviews: {
-          include: {
-            user: {
-              select: { name: true, email: true }
-            }
-          },
-          orderBy: { createdAt: 'desc' }
-        },
-        _count: {
-          select: { reviews: true }
-        }
-      }
+        reviews: true,
+        _count: true,
+      },
     });
 
     if (!product) {
@@ -95,9 +86,10 @@ router.get('/:id', async (req, res, next) => {
 
     res.json({
       success: true,
-      data: product
+      data: product,
     });
   } catch (error) {
+    console.error(error);
     if (error instanceof AppError) {
       next(error);
     } else {
@@ -109,11 +101,11 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/products - Create new product (Admin only)
 router.post('/', async (req, res, next) => {
   try {
-    const { name, description, price, stock, categoryId, imageUrl } = req.body;
+    const { name, description, price, stock, categoryId, imageUrl, condition } = req.body;
 
     // Validate required fields
-    if (!name || !price || !categoryId) {
-      throw new AppError('Name, price, and category are required', 400);
+    if (!name || !price || !categoryId || !condition) {
+      throw new AppError('Name, price, category, and condition are required', 400);
     }
 
     const product = await prisma.product.create({
@@ -121,21 +113,26 @@ router.post('/', async (req, res, next) => {
         name,
         description,
         price: Number(price),
-        stock: Number(stock) || 0,
+        stock: stock !== undefined ? Number(stock) : 0,
         categoryId,
-        imageUrl
-      },
+        imageUrl,
+        isActive: true,
+        condition,
+      } as Prisma.ProductUncheckedCreateInput,
       include: {
-        category: true
-      }
+        category: true,
+        reviews: true,
+        _count: true,
+      },
     });
 
     res.status(201).json({
       success: true,
       data: product,
-      message: 'Product created successfully'
+      message: 'Product created successfully',
     });
   } catch (error) {
+    console.error(error);
     if (error instanceof AppError) {
       next(error);
     } else {
@@ -148,32 +145,42 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, price, stock, categoryId, imageUrl, isActive } = req.body;
+    const { name, description, price, stock, categoryId, imageUrl, isActive} = req.body;
+
+    // Build update data object only with provided fields
+    const data: Prisma.ProductUncheckedUpdateInput = {};
+    if (name !== undefined) data.name = name;
+    if (description !== undefined) data.description = description;
+    if (price !== undefined) data.price = Number(price);
+    if (stock !== undefined) data.stock = Number(stock);
+    if (categoryId !== undefined) data.categoryId = categoryId;
+    if (imageUrl !== undefined) data.imageUrl = imageUrl;
+    if (isActive !== undefined) data.isActive = isActive;
 
     const product = await prisma.product.update({
       where: { id },
-      data: {
-        name,
-        description,
-        price: price ? Number(price) : undefined,
-        stock: stock ? Number(stock) : undefined,
-        categoryId,
-        imageUrl,
-        isActive
-      },
+      data,
       include: {
-        category: true
-      }
+        category: true,
+        reviews: true,
+        _count: true,
+      },
     });
 
     res.json({
       success: true,
       data: product,
-      message: 'Product updated successfully'
+      message: 'Product updated successfully',
     });
   } catch (error) {
+    console.error(error);
     if (error instanceof AppError) {
       next(error);
+    } else if (
+      error instanceof Error &&
+      error.message.includes('Record to update not found')
+    ) {
+      next(new AppError('Product not found', 404));
     } else {
       next(new AppError('Failed to update product', 500));
     }
@@ -186,15 +193,23 @@ router.delete('/:id', async (req, res, next) => {
     const { id } = req.params;
 
     await prisma.product.delete({
-      where: { id }
+      where: { id },
     });
 
     res.json({
       success: true,
-      message: 'Product deleted successfully'
+      message: 'Product deleted successfully',
     });
   } catch (error) {
-    next(new AppError('Failed to delete product', 500));
+    console.error(error);
+    if (
+      error instanceof Error &&
+      error.message.includes('Record to delete does not exist')
+    ) {
+      next(new AppError('Product not found', 404));
+    } else {
+      next(new AppError('Failed to delete product', 500));
+    }
   }
 });
 
